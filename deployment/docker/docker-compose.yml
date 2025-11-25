@@ -1,0 +1,189 @@
+# Docker Compose - Architecture 2
+# Complete production stack
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: blood_cell_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: blood_cell_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - blood_cell_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache & Message Broker
+  redis:
+    image: redis:7-alpine
+    container_name: blood_cell_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - blood_cell_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: blood_cell_minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - blood_cell_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # API Service
+  api:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+      target: application
+    container_name: blood_cell_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://postgres:changeme@postgres:5432/blood_cell_db
+      - REDIS_URL=redis://redis:6379/0
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ../../checkpoints:/app/checkpoints:ro
+      - ../../data:/app/data:ro
+      - api_results:/app/results
+      - api_uploads:/app/uploads
+    ports:
+      - "8000:8000"
+      - "9090:9090"
+    networks:
+      - blood_cell_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  # Celery Worker
+  worker:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+      target: worker
+    container_name: blood_cell_worker
+    depends_on:
+      - redis
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql://postgres:changeme@postgres:5432/blood_cell_db
+      - REDIS_URL=redis://redis:6379/0
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ../../checkpoints:/app/checkpoints:ro
+      - ../../data:/app/data:ro
+      - worker_results:/app/results
+    networks:
+      - blood_cell_network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+      replicas: 2
+    restart: unless-stopped
+
+  # Flower (Celery monitoring)
+  flower:
+    image: mher/flower:latest
+    container_name: blood_cell_flower
+    depends_on:
+      - redis
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    ports:
+      - "5555:5555"
+    networks:
+      - blood_cell_network
+    restart: unless-stopped
+
+  # Prometheus (Monitoring)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: blood_cell_prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - "9091:9090"
+    networks:
+      - blood_cell_network
+    restart: unless-stopped
+
+  # Grafana (Visualization)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: blood_cell_grafana
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - blood_cell_network
+    restart: unless-stopped
+
+networks:
+  blood_cell_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  api_results:
+  api_uploads:
+  worker_results:
+  prometheus_data:
+  grafana_data:

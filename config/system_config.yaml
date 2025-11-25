@@ -1,0 +1,252 @@
+# Production Configuration - Architecture 2
+# =========================================
+
+system:
+  name: "Production Blood Cell Analysis System v2.0"
+  version: "2.0.0"
+  architecture: "htc_efficientnetv2_convnext"
+  
+# Model Configuration
+models:
+  segmentation:
+    architecture: "htc"  # Options: htc, mask_rcnn, yolov11_seg
+    backbone: "resnet101"
+    confidence_threshold: 0.5
+    nms_threshold: 0.5
+    max_detections: 500
+    
+  rbc_classifier:
+    architecture: "efficientnetv2_s"
+    num_classes: 8
+    input_size: 128
+    classes:
+      - normal
+      - macrocytic
+      - microcytic
+      - sickle
+      - target
+      - spherocyte
+      - echinocyte
+      - malaria_infected
+    
+  wbc_classifier:
+    architecture: "convnext_tiny"  # Options: convnext_tiny, vit_base_patch16_224
+    num_classes: 6
+    input_size: 224
+    classes:
+      - neutrophil
+      - eosinophil
+      - basophil
+      - monocyte
+      - lymphocyte
+      - blast_leukemia
+
+# Preprocessing Configuration
+preprocessing:
+  stain_normalization:
+    method: "macenko"  # Options: macenko, vahadane, reinhard, none
+    reference_image: "data/reference_stain.jpg"
+  
+  wsi_tiling:
+    enabled: true
+    tile_size: 1024
+    overlap: 128
+    min_tissue_ratio: 0.3
+    max_tiles_per_image: 1000
+  
+  quality_control:
+    enabled: true
+    min_image_size: [512, 512]
+    max_image_size: [50000, 50000]
+    min_focus_score: 50
+    min_contrast: 10
+
+# Training Configuration
+training:
+  # RBC Classifier Training
+  rbc:
+    epochs: 100
+    batch_size: 64
+    learning_rate: 0.001
+    weight_decay: 0.0001
+    optimizer: "adamw"
+    scheduler: "cosine"
+    mixed_precision: true
+    early_stopping_patience: 15
+    save_every: 10
+    num_workers: 8
+    
+  # WBC Classifier Training
+  wbc:
+    epochs: 100
+    batch_size: 32
+    learning_rate: 0.0005
+    weight_decay: 0.0001
+    optimizer: "adamw"
+    scheduler: "cosine"
+    mixed_precision: true
+    early_stopping_patience: 15
+    save_every: 10
+    num_workers: 8
+  
+  # Segmentation Training (Detectron2)
+  segmentation:
+    base_lr: 0.02
+    max_iter: 50000
+    warmup_iters: 1000
+    batch_size_per_image: 512
+    num_workers: 4
+
+# Inference Configuration
+inference:
+  device: "cuda"  # Options: cuda, cpu
+  batch_size: 16
+  use_amp: true  # Automatic Mixed Precision
+  min_confidence: 0.5
+  enable_visualization: true
+  visualization_output_dir: "results/visualizations"
+
+# Clinical Output Configuration
+clinical:
+  output_formats:
+    - json
+    - hl7
+    - fhir
+  
+  hl7:
+    version: "2.5"
+    sending_application: "BloodCellAnalyzer"
+    sending_facility: "LabSystem"
+  
+  fhir:
+    version: "R4"
+    base_url: "http://fhir.local"
+  
+  quality_thresholds:
+    min_cells_for_analysis: 50
+    max_abnormal_percentage: 80
+    blast_percentage_threshold: 5.0  # >5% blasts triggers leukemia flag
+
+# Microservices Configuration
+services:
+  api:
+    host: "0.0.0.0"
+    port: 8000
+    workers: 4
+    timeout: 300
+    max_request_size: "100MB"
+    cors_origins:
+      - "http://localhost:3000"
+      - "http://localhost:8080"
+  
+  worker:
+    concurrency: 4
+    max_tasks_per_child: 10
+    task_time_limit: 600
+    task_soft_time_limit: 540
+  
+  redis:
+    host: "localhost"
+    port: 6379
+    db: 0
+    password: null
+    max_connections: 50
+  
+  database:
+    host: "localhost"
+    port: 5432
+    database: "blood_cell_db"
+    username: "postgres"
+    password: "changeme"
+    pool_size: 10
+    max_overflow: 20
+  
+  storage:
+    backend: "s3"  # Options: s3, minio, local
+    s3:
+      bucket: "blood-cell-analysis"
+      region: "us-east-1"
+      endpoint_url: null  # For MinIO compatibility
+    minio:
+      endpoint: "localhost:9000"
+      access_key: "minioadmin"
+      secret_key: "minioadmin"
+      secure: false
+    local:
+      base_path: "/data/storage"
+
+# Monitoring Configuration
+monitoring:
+  prometheus:
+    enabled: true
+    port: 9090
+  
+  sentry:
+    enabled: false
+    dsn: null
+  
+  logging:
+    level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+    format: "json"  # Options: json, text
+    output: "stdout"  # Options: stdout, file
+    file_path: "logs/application.log"
+
+# Experiment Tracking
+experiment_tracking:
+  enabled: true
+  backend: "wandb"  # Options: wandb, mlflow, none
+  wandb:
+    project: "blood-cell-arch2"
+    entity: null
+    tags:
+      - "production"
+      - "arch2"
+  mlflow:
+    tracking_uri: "http://localhost:5000"
+    experiment_name: "blood-cell-arch2"
+
+# Deployment Configuration
+deployment:
+  environment: "production"  # Options: development, staging, production
+  replicas: 3
+  resource_limits:
+    memory: "8Gi"
+    cpu: "4"
+    gpu: "1"
+  autoscaling:
+    enabled: true
+    min_replicas: 2
+    max_replicas: 10
+    target_cpu_utilization: 70
+
+# Data Configuration
+data:
+  datasets:
+    rbc:
+      train: "data/rbc/train"
+      val: "data/rbc/val"
+      test: "data/rbc/test"
+    wbc:
+      train: "data/wbc/train"
+      val: "data/wbc/val"
+      test: "data/wbc/test"
+    segmentation:
+      train_images: "data/segmentation/images/train"
+      train_annotations: "data/segmentation/annotations/train.json"
+      val_images: "data/segmentation/images/val"
+      val_annotations: "data/segmentation/annotations/val.json"
+
+# Checkpoints
+checkpoints:
+  dir: "checkpoints"
+  save_best_only: false
+  save_frequency: 10  # Save every N epochs
+  max_checkpoints_to_keep: 5
+
+# Security
+security:
+  enable_authentication: true
+  enable_encryption: true
+  api_key_header: "X-API-Key"
+  jwt_secret: "change-this-secret-key-in-production"
+  jwt_expiration: 3600  # 1 hour

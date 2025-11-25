@@ -1,0 +1,58 @@
+# Training Configuration Presets
+# ================================
+
+# Fast Training (for testing and quick experiments)
+fast:
+  description: "Quick training for testing"
+  d_reduced: 32
+  use_domain_adapt: false
+  epochs:
+    segmentation: 10
+    rbc_classifier: 10
+    wbc_classifier: 10
+  batch_size: 64
+  learning_rate: 0.001
+  expected_time: "~3 hours"
+
+# Balanced Training (recommended for most use cases)
+balanced:
+  description: "Balanced speed and accuracy"
+  d_reduced: 64
+  use_domain_adapt: true
+  epochs:
+    segmentation: 50
+    rbc_classifier: 50
+    wbc_classifier: 50
+  batch_size: 32
+  learning_rate: 0.0001
+  expected_time: "~13 hours"
+
+# Accurate Training (for production deployment)
+accurate:
+  description: "Best accuracy for production"
+  d_reduced: 128
+  use_domain_adapt: true
+  epochs:
+    segmentation: 100
+    rbc_classifier: 100
+    wbc_classifier: 100
+  batch_size: 32
+  learning_rate: 0.0001
+  expected_time: "~25 hours"
+
+# Research Configuration (for experimentation)
+research:
+  description: "High precision for research"
+  d_reduced: 128
+  use_domain_adapt: true
+  epochs:
+    segmentation: 150
+    rbc_classifier: 150
+    wbc_classifier: 150
+  batch_size: 16
+  learning_rate: 0.00005
+  expected_time: "~40 hours"
+  additional_settings:
+    use_mixed_precision: true
+    save_all_checkpoints: true
+    detailed_logging: true

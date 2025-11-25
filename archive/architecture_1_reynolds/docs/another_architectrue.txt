@@ -1,0 +1,80 @@
+High-Level Architecture Sketch
+[Lab Image] → [Ingestion API] → [Preprocessor] → [Segmentation Engine] → [ROI Extractor & Router] → [Async Batcher] → [Dual-Head Classification System] → [Aggregator] → [Structured Report]
+
+Detailed Pipeline Components
+1. Data Ingestion & Preprocessing (The "Generalizable" Layer)
+This stage ensures that images from different labs (varying lighting, stain quality, resolutions) are standardized before reaching the models.
+
+Input Validator: Checks file integrity, metadata, and resolution. Rejects corrupted files immediately.
+
+Stain Normalization (Crucial for Generalizability): Apply a technique like Macenko or Vahadane normalization. This mathematically aligns the color distribution of the input image to a target reference template, neutralizing variations in lab staining protocols (e.g., one lab's Giemsa stain being "bluer" than another).​
+
+Adaptive Tiling/Patching: High-res microscopy images (e.g., 40k x 40k pixels) cannot be processed at once.
+
+Logic: Slice image into overlapping tiles (e.g., 1024x1024) with a 10-20% overlap to prevent cutting cells at boundaries.
+
+Optimization: Discard "background-only" tiles using simple thresholding to save compute.
+
+2. Universal Segmentation Engine (The "Robust" Layer)
+A single, heavy-duty model responsible for locating and masking every cell.
+
+Model Architecture: Instance Segmentation is required (not just semantic) to separate touching cells.
+
+Recommendation: Hybrid Task Cascade (HTC) or a Swin Transformer-based Mask R-CNN. Alternatively, YOLOv11-seg for higher speed if real-time is a priority.​
+
+Why: Standard U-Net often fails to separate touching RBCs (clumps). Instance segmentation architectures predict separate masks for each object instance.
+
+Classes: The model predicts 3 classes: Background, RBC, WBC. (Optionally Platelets if needed later).
+
+Output: A set of bounding boxes and binary masks for every detected cell.
+
+3. ROI Extraction & Dynamic Routing
+This logic layer acts as the traffic controller between segmentation and classification.
+
+Filter & Clean:
+
+Discard detections with low confidence scores (<0.5).
+
+Remove artifacts based on morphological heuristics (e.g., area < 50 pixels or aspect ratio > 5:1).
+
+Crop & Pad: Extract square crops of each detected cell.
+
+Robustness tip: Add loose padding (context) around the cell. A tight crop often removes edge features crucial for classification.
+
+The Router:
+
+Stream A (RBC Candidates): All objects classified as RBC by the segmentation model.
+
+Stream B (WBC Candidates): All objects classified as WBC by the segmentation model.
+
+4. Dual Classification Systems (The "Specialized" Layer)
+Separating these allows you to use different architectures suited for the biological complexity of each cell type.
+
+Pipeline A: RBC Classifier (Morphology Focus)
+
+Task: Classify RBCs into Normal, Macrocytic, Microcytic, Sickle Cell, etc.
+
+Model: EfficientNet-V2 (Small) or ResNet-50.
+
+Why: RBC classification relies heavily on shape and texture. These CNNs are highly efficient at texture extraction.
+
+Input: 64x64 or 128x128 resized crops.
+
+Pipeline B: WBC Classifier (Fine-grained Feature Focus)
+
+Task: Classify WBCs into Neutrophil, Eosinophil, Basophil, Monocyte, Lymphocyte, Blast (Immature).
+
+Model: ConvNeXt or Vision Transformer (ViT-Tiny).
+
+Why: WBC differentiation (granularity vs. nucleus shape) is subtle. Transformers generally outperform CNNs on fine-grained recognition tasks when trained on sufficient data.​
+
+Input: 224x224 resized crops (WBCs need higher resolution than RBCs).
+
+5. Result Aggregation & Structured Output
+De-duplication: If using overlapping tiles in Step 1, use Non-Maximum Suppression (NMS) to merge duplicate detections of the same cell from adjacent tiles.
+
+Count Statistics: Calculate ratios (e.g., M:E ratio, differential count percentages).
+
+JSON Payload Construction:
+
+json

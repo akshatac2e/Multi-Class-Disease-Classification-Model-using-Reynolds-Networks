@@ -1,0 +1,395 @@
+# Kubernetes Deployment - Architecture 2
+# Production-ready K8s manifests
+
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: blood-cell-analysis
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: blood-cell-config
+  namespace: blood-cell-analysis
+data:
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "blood_cell_db"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  MINIO_ENDPOINT: "minio-service:9000"
+
+---
+# Secret for sensitive data
+apiVersion: v1
+kind: Secret
+metadata:
+  name: blood-cell-secrets
+  namespace: blood-cell-analysis
+type: Opaque
+stringData:
+  DATABASE_PASSWORD: "changeme"
+  MINIO_ACCESS_KEY: "minioadmin"
+  MINIO_SECRET_KEY: "minioadmin"
+
+---
+# PostgreSQL Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: blood-cell-analysis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: blood-cell-secrets
+              key: DATABASE_PASSWORD
+        - name: POSTGRES_DB
+          value: "blood_cell_db"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1"
+      volumes:
+      - name: postgres-storage
+        persistentVolumeClaim:
+          claimName: postgres-pvc
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: blood-cell-analysis
+spec:
+  selector:
+    app: postgres
+  ports:
+  - protocol: TCP
+    port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: blood-cell-analysis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: blood-cell-analysis
+spec:
+  selector:
+    app: redis
+  ports:
+  - protocol: TCP
+    port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+# API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blood-cell-api
+  namespace: blood-cell-analysis
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: blood-cell-api
+  template:
+    metadata:
+      labels:
+        app: blood-cell-api
+    spec:
+      containers:
+      - name: api
+        image: blood-cell-analysis:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://postgres:$(DATABASE_PASSWORD)@postgres-service:5432/blood_cell_db"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: blood-cell-secrets
+              key: DATABASE_PASSWORD
+        - name: REDIS_URL
+          value: "redis://redis-service:6379/0"
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: checkpoints
+          mountPath: /app/checkpoints
+          readOnly: true
+        - name: results
+          mountPath: /app/results
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+      volumes:
+      - name: checkpoints
+        persistentVolumeClaim:
+          claimName: checkpoints-pvc
+      - name: results
+        persistentVolumeClaim:
+          claimName: results-pvc
+
+---
+# API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: blood-cell-api-service
+  namespace: blood-cell-analysis
+spec:
+  selector:
+    app: blood-cell-api
+  ports:
+  - name: http
+    protocol: TCP
+    port: 80
+    targetPort: 8000
+  - name: metrics
+    protocol: TCP
+    port: 9090
+    targetPort: 9090
+  type: LoadBalancer
+
+---
+# Worker Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: blood-cell-worker
+  namespace: blood-cell-analysis
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: blood-cell-worker
+  template:
+    metadata:
+      labels:
+        app: blood-cell-worker
+    spec:
+      containers:
+      - name: worker
+        image: blood-cell-analysis:latest
+        imagePullPolicy: Always
+        command: ["celery", "-A", "services.worker.tasks", "worker", "--loglevel=info"]
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://postgres:$(DATABASE_PASSWORD)@postgres-service:5432/blood_cell_db"
+        - name: DATABASE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: blood-cell-secrets
+              key: DATABASE_PASSWORD
+        - name: REDIS_URL
+          value: "redis://redis-service:6379/0"
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: checkpoints
+          mountPath: /app/checkpoints
+          readOnly: true
+        - name: results
+          mountPath: /app/results
+      volumes:
+      - name: checkpoints
+        persistentVolumeClaim:
+          claimName: checkpoints-pvc
+      - name: results
+        persistentVolumeClaim:
+          claimName: results-pvc
+
+---
+# Horizontal Pod Autoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: blood-cell-api-hpa
+  namespace: blood-cell-analysis
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: blood-cell-api
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# PersistentVolumeClaim for checkpoints
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: checkpoints-pvc
+  namespace: blood-cell-analysis
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
+---
+# PersistentVolumeClaim for results
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: results-pvc
+  namespace: blood-cell-analysis
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+
+---
+# PersistentVolumeClaim for PostgreSQL
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: blood-cell-analysis
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: standard
+
+---
+# Ingress (NGINX)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: blood-cell-ingress
+  namespace: blood-cell-analysis
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - blood-cell-api.example.com
+    secretName: blood-cell-tls
+  rules:
+  - host: blood-cell-api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: blood-cell-api-service
+            port:
+              number: 80
